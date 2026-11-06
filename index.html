@@ -1,0 +1,367 @@
+<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"></head><body><title>Kippbier</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bagel+Fat+One&family=Outfit:wght@400;600&display=swap">
+<style>
+/* Layout: one-screen bar counter — the glass hangs centred over a walnut backdrop, readout on top, controls pinned to the bottom */
+:root{
+  --wood:#24160f;
+  --wood-hi:#4a2c1a;
+  --brass:#e0a943;
+  --cream:#fff3dc;
+  --muted:#c4a68a;
+  --line:rgba(255,243,220,.16);
+  --display:"Bagel Fat One","Arial Rounded MT Bold",system-ui,sans-serif;
+  --body:"Outfit",system-ui,-apple-system,"Segoe UI",sans-serif;
+  color-scheme:dark;
+}
+html,body{height:100%}
+[hidden]{display:none!important}
+body{margin:0;background:var(--wood);color:var(--cream);font-family:var(--body);overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+.app{position:relative;height:100%;overflow:hidden}
+canvas{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:grab}
+canvas:active{cursor:grabbing}
+.bar{position:absolute;left:0;right:0;display:flex;align-items:center;justify-content:space-between;gap:12px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));pointer-events:none}
+.top{top:0;padding-block:14px 0;align-items:baseline}
+.brand{font-family:var(--display);font-size:1.6rem;letter-spacing:.01em;color:var(--brass);line-height:1}
+.readout{font-variant-numeric:tabular-nums;font-weight:600;font-size:1rem;color:var(--cream);text-align:right}
+.readout small{display:block;font-weight:400;font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.bottom{bottom:0;padding-block:0 18px;flex-direction:column;align-items:stretch;gap:10px}
+.hint{text-align:center;font-size:.9rem;color:var(--muted);min-height:1.3em;text-wrap:balance}
+.row{display:flex;gap:10px;justify-content:center;pointer-events:auto}
+button{font:inherit;border:0;cursor:pointer;border-radius:999px;padding:12px 20px;font-weight:600;font-size:1rem;touch-action:manipulation}
+button:focus-visible{outline:3px solid var(--cream);outline-offset:3px}
+.primary{background:var(--brass);color:var(--wood)}
+.ghost{background:transparent;color:var(--cream);box-shadow:inset 0 0 0 1.5px var(--line)}
+.overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(20,12,8,.55);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.card{max-width:20rem;text-align:center;display:flex;flex-direction:column;gap:14px;align-items:center}
+.card h1{margin:0;font-family:var(--display);font-weight:400;font-size:3rem;line-height:1;color:var(--brass)}
+.card p{margin:0;font-size:1rem;line-height:1.45;color:var(--cream);text-wrap:balance}
+.card .primary{font-size:1.25rem;padding:16px 40px}
+</style>
+
+<div class="app">
+  <canvas id="c" aria-label="Bierglas, das sich mit dem Handy neigt"></canvas>
+
+  <div class="bar top">
+    <div class="brand">Kippbier</div>
+    <div class="readout"><span id="cl">50 cl</span><small>bis Eichstrich</small></div>
+  </div>
+
+  <div class="bar bottom">
+    <div class="hint" id="hint">Handy zum Mund kippen</div>
+    <div class="row">
+      <button class="ghost" id="calib" type="button">Neu ausrichten</button>
+      <button class="primary" id="refill" type="button">Nachzapfen</button>
+    </div>
+  </div>
+
+  <div class="overlay" id="overlay">
+    <div class="card">
+      <h1>Prost!</h1>
+      <p>Halt das Handy aufrecht wie ein Glas. Tippen, zapfen lassen, dann zum Mund kippen.</p>
+      <button class="primary" id="start" type="button">Zapfen</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(()=>{
+const cv=document.getElementById('c'), ctx=cv.getContext('2d');
+const $=id=>document.getElementById(id);
+let W=0,Hs=0,dpr=1;
+
+/* ---------- glass geometry (units: glass height = 1, y up) ---------- */
+const N=18;
+const half=t=>0.165+0.085*t+0.03*Math.sin(Math.PI*Math.min(1,Math.max(0,(t-0.3)/0.7)));
+const LOCAL=[];
+for(let i=0;i<=N;i++){const t=i/N;LOCAL.push([half(t),t]);}
+for(let i=N;i>=0;i--){const t=i/N;LOCAL.push([-half(t),t]);}
+const RIM_R=N, RIM_L=N+1, PIVOT=0.45, EICH=0.86;
+
+function clip(P,nx,ny,c){const o=[],L=P.length;for(let i=0;i<L;i++){const a=P[i],b=P[(i+1)%L];const da=a[0]*nx+a[1]*ny-c,db=b[0]*nx+b[1]*ny-c;if(da<=0)o.push(a);if((da<=0)!==(db<=0)){const t=da/(da-db);o.push([a[0]+(b[0]-a[0])*t,a[1]+(b[1]-a[1])*t]);}}return o;}
+function area(P){let s=0;for(let i=0,L=P.length;i<L;i++){const a=P[i],b=P[(i+1)%L];s+=a[0]*b[1]-b[0]*a[1];}return Math.abs(s)/2;}
+function solve(P,nx,ny,A){let lo=Infinity,hi=-Infinity;for(const p of P){const d=p[0]*nx+p[1]*ny;if(d<lo)lo=d;if(d>hi)hi=d;}if(A<=0)return lo;for(let k=0;k<26;k++){const m=(lo+hi)/2;if(area(clip(P,nx,ny,m))<A)lo=m;else hi=m;}return (lo+hi)/2;}
+function inside(P,x,y){let r=false;for(let i=0,j=P.length-1;i<P.length;j=i++){const a=P[i],b=P[j];if((a[1]>y)!==(b[1]>y)&&x<(b[0]-a[0])*(y-a[1])/(b[1]-a[1])+a[0])r=!r;}return r;}
+
+const A0=area(LOCAL);
+const AE=area(clip(LOCAL,0,1,EICH));
+const V_FULL=AE, F_FULL=(A0-AE)*0.96;
+
+/* ---------- state ---------- */
+const S={V:V_FULL,F:F_FULL,th:0,thV:0,target:0,phi:0,phiV:0,fill:null,spilled:0};
+let parts=[], spawnAcc=0, bubbles=[];
+for(let i=0;i<34;i++)bubbles.push({x:0,y:-9,s:0.05+Math.random()*0.12,r:0.004+Math.random()*0.006,w:Math.random()*6});
+
+function worldPoly(th){const c=Math.cos(th),s=Math.sin(th);return LOCAL.map(([x,y])=>{y-=PIVOT;return [x*c-y*s,x*s+y*c];});}
+
+/* ---------- sensor ---------- */
+let u0=null, sensorOK=false, sensorTh=0, dragging=null;
+function onOri(e){
+  if(e.beta==null||e.gamma==null)return;
+  sensorOK=true;
+  const b=e.beta*Math.PI/180,g=e.gamma*Math.PI/180;
+  const u=[-Math.cos(b)*Math.sin(g),Math.sin(b),Math.cos(b)*Math.cos(g)];
+  if(!u0)u0=u;
+  const d=Math.max(-1,Math.min(1,u[0]*u0[0]+u[1]*u0[1]+u[2]*u0[2]));
+  sensorTh=Math.min(2.6,Math.acos(d));
+}
+
+/* ---------- audio (synthesised) ---------- */
+let AC=null,master,noiseBuf,pourGain,pourFilt,glugT=0;
+function initAudio(){
+  if(AC)return;
+  const C=window.AudioContext||window.webkitAudioContext; if(!C)return;
+  AC=new C();
+  const len=AC.sampleRate*2;noiseBuf=AC.createBuffer(1,len,AC.sampleRate);
+  const d=noiseBuf.getChannelData(0);for(let i=0;i<len;i++)d[i]=Math.random()*2-1;
+  const comp=AC.createDynamicsCompressor();master=AC.createGain();master.gain.value=0.9;
+  master.connect(comp);comp.connect(AC.destination);
+  const n=noise();pourFilt=AC.createBiquadFilter();pourFilt.type='bandpass';pourFilt.frequency.value=620;pourFilt.Q.value=0.9;
+  pourGain=AC.createGain();pourGain.gain.value=0;n.connect(pourFilt);pourFilt.connect(pourGain);pourGain.connect(master);n.start();
+}
+function noise(){const s=AC.createBufferSource();s.buffer=noiseBuf;s.loop=true;return s;}
+function blip(t,f,dur,vol,ratio){
+  const o=AC.createOscillator(),g=AC.createGain();o.type='sine';
+  o.frequency.setValueAtTime(f,t);o.frequency.exponentialRampToValueAtTime(f*ratio,t+dur);
+  g.gain.setValueAtTime(0.0001,t);g.gain.exponentialRampToValueAtTime(vol,t+0.004);g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+  o.connect(g);g.connect(master);o.start(t);o.stop(t+dur+0.02);
+}
+function playTap(dur){
+  if(!AC)return;const t=AC.currentTime+0.02,end=t+dur;
+  // Hahn auf: Klack
+  blip(t,150,0.07,0.35,0.5);
+  const k=noise(),kf=AC.createBiquadFilter(),kg=AC.createGain();kf.type='highpass';kf.frequency.value=1800;
+  kg.gain.setValueAtTime(0.3,t);kg.gain.exponentialRampToValueAtTime(0.0001,t+0.03);k.connect(kf);kf.connect(kg);kg.connect(master);k.start(t);k.stop(t+0.05);
+  // Zischen aus dem Hahn (CO2)
+  const h=noise(),hf=AC.createBiquadFilter(),hg=AC.createGain();hf.type='highpass';hf.frequency.value=3800;
+  hg.gain.setValueAtTime(0.0001,t);hg.gain.exponentialRampToValueAtTime(0.09,t+0.08);hg.gain.setValueAtTime(0.09,end-0.2);
+  hg.gain.linearRampToValueAtTime(0.16,end-0.06);hg.gain.exponentialRampToValueAtTime(0.0001,end+0.08);
+  h.connect(hf);hf.connect(hg);hg.connect(master);h.start(t);h.stop(end+0.15);
+  // Strahl ins Glas, Resonanz steigt beim Füllen
+  const s=noise(),sf=AC.createBiquadFilter(),sg=AC.createGain();sf.type='bandpass';sf.Q.value=1.4;
+  sf.frequency.setValueAtTime(480,t);sf.frequency.exponentialRampToValueAtTime(1100,end);
+  const lfo=AC.createOscillator(),lg=AC.createGain();lfo.frequency.value=9;lg.gain.value=110;lfo.connect(lg);lg.connect(sf.frequency);lfo.start(t);lfo.stop(end+0.1);
+  sg.gain.setValueAtTime(0.0001,t);sg.gain.exponentialRampToValueAtTime(0.55,t+0.12);sg.gain.setValueAtTime(0.5,end-0.25);sg.gain.exponentialRampToValueAtTime(0.0001,end);
+  s.connect(sf);sf.connect(sg);sg.connect(master);s.start(t);s.stop(end+0.1);
+  // Blubbern und Schaum
+  for(let x=t+0.1;x<end-0.05;x+=0.012+Math.random()*0.035){
+    const p=(x-t)/dur,f=(320+750*p)*(0.8+Math.random()*0.5);
+    blip(x,f,0.025+Math.random()*0.03,0.025+Math.random()*0.05,1.4+Math.random()*0.7);
+  }
+  // Schaum knistert nach
+  for(let x=end;x<end+0.6;x+=0.02+Math.random()*0.05)blip(x,1800+Math.random()*2200,0.012,0.012+Math.random()*0.015,1.2);
+}
+function glug(intensity){
+  if(!AC)return;const t=AC.currentTime,f=105+Math.random()*90,v=Math.min(0.4,0.1+0.25*intensity);
+  blip(t,f,0.1+Math.random()*0.05,v,2.3);blip(t+0.025,f*2.2,0.06,v*0.35,1.6);
+}
+
+/* ---------- refill ---------- */
+function startFill(){
+  const missing=Math.max(0,(V_FULL-S.V)/V_FULL);
+  const dur=1.3+2.6*Math.max(missing,0.25);
+  S.fill={t:0,dur,V0:S.V,F0:S.F,e:0};
+  S.spilled=0;
+  playTap(dur);
+}
+const ease=p=>p<0.5?2*p*p:1-Math.pow(-2*p+2,2)/2;
+
+/* ---------- input ---------- */
+cv.addEventListener('pointerdown',e=>{dragging={x:e.clientX,y:e.clientY,th:S.target};cv.setPointerCapture(e.pointerId);});
+cv.addEventListener('pointermove',e=>{if(!dragging)return;const d=(dragging.x-e.clientX)+(dragging.y-e.clientY)*0.6;S.dragTh=Math.max(0,Math.min(2.5,dragging.th+d*0.007));});
+const endDrag=()=>{dragging=null;S.dragTh=null;};
+cv.addEventListener('pointerup',endDrag);cv.addEventListener('pointercancel',endDrag);
+
+$('start').addEventListener('click',async()=>{
+  initAudio();
+  let perm=Promise.resolve('granted');
+  try{if(window.DeviceOrientationEvent&&typeof DeviceOrientationEvent.requestPermission==='function')perm=DeviceOrientationEvent.requestPermission();}catch(_){}
+  try{AC&&AC.resume();}catch(_){}
+  $('overlay').hidden=true;
+  S.V=0;S.F=0;startFill();
+  try{if(await perm==='granted')addEventListener('deviceorientation',onOri);}catch(_){}
+  try{navigator.wakeLock&&navigator.wakeLock.request('screen').catch(()=>{});}catch(_){}
+  setTimeout(()=>{if(!sensorOK)$('hint').textContent='Kein Bewegungssensor hier: kipp das Glas mit dem Finger';},1600);
+});
+$('refill').addEventListener('click',()=>{initAudio();if(!S.fill)startFill();});
+$('calib').addEventListener('click',()=>{u0=null;$('hint').textContent=sensorOK?'Ausgerichtet. Jetzt zum Mund kippen':'Kipp das Glas mit dem Finger';});
+
+/* ---------- loop ---------- */
+function resize(){dpr=Math.min(2,window.devicePixelRatio||1);W=cv.clientWidth;Hs=cv.clientHeight;cv.width=Math.round(W*dpr);cv.height=Math.round(Hs*dpr);}
+addEventListener('resize',resize);resize();
+
+let last=performance.now();
+function step(now){
+  let dt=Math.min(0.04,(now-last)/1000);last=now;
+
+  // target tilt
+  S.target=(S.dragTh!=null)?S.dragTh:(sensorOK?sensorTh:0);
+  if(S.fill)S.target=Math.min(S.target,0.35);
+  const prevTh=S.th;
+  S.thV+=((S.target-S.th)*140-S.thV*20)*dt;S.th+=S.thV*dt;
+  if(S.th<0){S.th=0;S.thV=0;}
+  // slosh
+  const phiT=Math.max(-0.35,Math.min(0.35,-S.thV*0.05));
+  S.phiV+=((phiT-S.phi)*90-S.phiV*5)*dt;S.phi+=S.phiV*dt;
+
+  // filling
+  if(S.fill){
+    const f=S.fill;f.t+=dt;const p=Math.min(1,f.t/f.dur),e=ease(p),de=e-f.e;f.e=e;
+    S.V+=(V_FULL-f.V0)*de;
+    const foamTarget=F_FULL+(A0-AE)*0.0;
+    S.F=Math.max(S.F,f.F0+(foamTarget-f.F0)*Math.min(1,p*1.15)+(A0*0.06)*Math.sin(Math.PI*p));
+    if(p>=1)S.fill=null;
+  }
+
+  const P=worldPoly(S.th);
+  const nx=-Math.sin(S.phi),ny=Math.cos(S.phi);
+  const cRim=Math.min(P[RIM_R][0]*nx+P[RIM_R][1]*ny,P[RIM_L][0]*nx+P[RIM_L][1]*ny);
+  const cap=area(clip(P,nx,ny,cRim));
+  const lip=(P[RIM_R][0]*nx+P[RIM_R][1]*ny)<(P[RIM_L][0]*nx+P[RIM_L][1]*ny)?P[RIM_R]:P[RIM_L];
+
+  let out=0,foamOut=0;
+  const total=S.V+S.F;
+  if(total>cap){
+    const E=total-cap;out=E<1e-5?E:E*(1-Math.exp(-dt*6));
+    foamOut=Math.min(S.F,out);S.F-=foamOut;S.V=Math.max(0,S.V-(out-foamOut));
+  }
+  if(!S.fill)S.F=Math.max(0,S.F-S.F*0.004*dt);
+  if(S.V+S.F<A0*0.002){S.V=Math.max(0,S.V);}
+
+  // spill particles
+  const axis=[-Math.sin(S.th),Math.cos(S.th)];
+  spawnAcc+=out/0.0004;
+  let n=Math.min(40,Math.floor(spawnAcc));spawnAcc-=n;
+  const foamy=out>0?foamOut/out:0;
+  while(n-->0&&parts.length<700){
+    const sp=0.25+Math.random()*0.25+out/dt/A0*0.15;
+    parts.push({x:lip[0]+(Math.random()-0.5)*0.03,y:lip[1]+(Math.random()-0.5)*0.02,vx:axis[0]*sp+(Math.random()-0.5)*0.08,vy:axis[1]*sp*0.6,px:lip[0],py:lip[1],foam:Math.random()<foamy});
+  }
+  const bottomY=-(Hs*0.5)/scale()-0.05;
+  for(const p of parts){p.px=p.x;p.py=p.y;p.vy-=4.2*dt;p.x+=p.vx*dt;p.y+=p.vy*dt;}
+  const before=parts.length;parts=parts.filter(p=>p.y>bottomY);S.spilled+=before-parts.length;
+
+  // sound for pouring
+  if(AC){
+    const flow=out/dt/A0;
+    pourGain.gain.setTargetAtTime(Math.min(0.32,flow*0.6),AC.currentTime,0.05);
+    pourFilt.frequency.setTargetAtTime(500+Math.min(700,flow*500),AC.currentTime,0.1);
+    if(flow>0.03){glugT-=dt;if(glugT<=0){glug(Math.min(1,flow));glugT=(0.07+Math.random()*0.18)/(0.6+Math.min(2,flow)*1.5);}}
+    else glugT=0;
+  }
+
+  draw(P,nx,ny);
+  $('cl').textContent=Math.round(S.V/AE*50)+' cl';
+  const low=S.V<V_FULL*0.15&&!S.fill;
+  $('refill').className=low?'primary':'ghost';
+  requestAnimationFrame(step);
+}
+
+function scale(){return Math.min(Hs*0.5,W*0.82);}
+
+function draw(P,nx,ny){
+  const sc=scale(),cx=W/2,cy=Hs*0.52;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  // backdrop
+  const bg=ctx.createRadialGradient(cx,cy,10,cx,cy,Math.max(W,Hs)*0.75);
+  bg.addColorStop(0,'#4a2c1a');bg.addColorStop(0.55,'#2e1c12');bg.addColorStop(1,'#1a100a');
+  ctx.fillStyle=bg;ctx.fillRect(0,0,W,Hs);
+  // planks
+  ctx.strokeStyle='rgba(255,220,180,0.035)';ctx.lineWidth=1;
+  for(let x=-W;x<W*2;x+=46){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x+Hs*0.08,Hs);ctx.stroke();}
+  // puddle
+  if(S.spilled>0){
+    const ph=Math.min(Hs*0.07,Math.sqrt(S.spilled)*1.2);
+    const g=ctx.createLinearGradient(0,Hs-ph,0,Hs);g.addColorStop(0,'rgba(240,170,50,0.55)');g.addColorStop(1,'rgba(160,90,20,0.75)');
+    ctx.fillStyle=g;ctx.beginPath();ctx.moveTo(0,Hs);ctx.lineTo(0,Hs-ph*0.6);
+    ctx.quadraticCurveTo(W*0.25,Hs-ph*1.1,W*0.5,Hs-ph*0.8);ctx.quadraticCurveTo(W*0.75,Hs-ph*0.5,W,Hs-ph*0.9);ctx.lineTo(W,Hs);ctx.fill();
+  }
+
+  // world transform
+  ctx.setTransform(dpr*sc,0,0,-dpr*sc,dpr*cx,dpr*cy);
+  const lw=1/sc;
+
+  // tap stream while filling
+  if(S.fill&&S.fill.t/S.fill.dur<0.93){
+    const top=(cy)/sc+0.1;const w=0.022+0.006*Math.sin(performance.now()/40);
+    const sg=ctx.createLinearGradient(0,top,0,0);sg.addColorStop(0,'rgba(245,190,80,0.95)');sg.addColorStop(1,'rgba(225,150,40,0.9)');
+    ctx.fillStyle=sg;ctx.fillRect(0.03-w/2,-0.2,w,top+0.2);
+  }
+
+  // glass body (behind liquid)
+  ctx.save();
+  ctx.rotate(S.th);ctx.translate(0,-PIVOT);
+  outerPath();ctx.fillStyle='rgba(255,243,220,0.06)';ctx.fill();
+  ctx.restore();
+
+  // liquid + foam
+  const cL=solve(P,nx,ny,S.V),cT=solve(P,nx,ny,S.V+S.F);
+  const L=S.V>1e-5?clip(P,nx,ny,cL):[];
+  if(L.length>2){
+    const g=ctx.createLinearGradient(0,cL,0,cL-1);g.addColorStop(0,'#f6bd45');g.addColorStop(0.5,'#e19a2a');g.addColorStop(1,'#b8681a');
+    poly(L);ctx.fillStyle=g;ctx.fill();
+    // bubbles
+    ctx.save();poly(L);ctx.clip();
+    let mnx=Infinity,mxx=-Infinity,mny=Infinity,mxy=-Infinity;for(const p of L){mnx=Math.min(mnx,p[0]);mxx=Math.max(mxx,p[0]);mny=Math.min(mny,p[1]);mxy=Math.max(mxy,p[1]);}
+    const t=performance.now()/1000;
+    ctx.fillStyle='rgba(255,246,220,0.55)';
+    for(const b of bubbles){
+      b.y+=b.s*0.016;
+      if(!inside(L,b.x,b.y)){for(let k=0;k<8;k++){b.x=mnx+Math.random()*(mxx-mnx);b.y=mny+Math.random()*(mxy-mny)*0.6;if(inside(L,b.x,b.y))break;}}
+      ctx.beginPath();ctx.arc(b.x+Math.sin(t*3+b.w)*0.004,b.y,b.r,0,Math.PI*2);ctx.fill();
+    }
+    ctx.restore();
+  }
+  if(S.F>1e-5){
+    const Fp=clip(clip(P,nx,ny,cT),-nx,-ny,-cL);
+    if(Fp.length>2){
+      const g=ctx.createLinearGradient(0,cT,0,cL);g.addColorStop(0,'#fffaf0');g.addColorStop(1,'#f3dfb4');
+      poly(Fp);ctx.fillStyle=g;ctx.fill();
+      ctx.save();poly(Fp);ctx.clip();ctx.fillStyle='rgba(214,180,120,0.35)';
+      for(let i=0;i<26;i++){const a=i*12.9898,x=Math.sin(a)*0.28,y=cL+((Math.sin(a*1.7)+1)/2)*(cT-cL);ctx.beginPath();ctx.arc(x,y,0.006+0.004*((i*7)%3),0,Math.PI*2);ctx.fill();}
+      ctx.restore();
+    }
+  }
+
+  // glass outline + highlights + Eichstrich
+  ctx.save();
+  ctx.rotate(S.th);ctx.translate(0,-PIVOT);
+  outerPath();ctx.lineWidth=1.6*lw;ctx.strokeStyle='rgba(255,243,220,0.55)';ctx.stroke();
+  // thick base
+  ctx.beginPath();ctx.moveTo(-half(0)-0.02,-0.07);ctx.lineTo(half(0)+0.02,-0.07);ctx.lineTo(half(0),0);ctx.lineTo(-half(0),0);ctx.closePath();
+  ctx.fillStyle='rgba(255,243,220,0.16)';ctx.fill();
+  // highlight streak
+  ctx.beginPath();for(let i=2;i<=N-2;i++){const t=i/N,x=-half(t)+0.035;i===2?ctx.moveTo(x,t):ctx.lineTo(x,t);}
+  ctx.lineWidth=7*lw;ctx.lineCap='round';ctx.strokeStyle='rgba(255,255,255,0.13)';ctx.stroke();
+  ctx.beginPath();for(let i=4;i<=N-6;i++){const t=i/N,x=half(t)-0.03;i===4?ctx.moveTo(x,t):ctx.lineTo(x,t);}
+  ctx.lineWidth=3*lw;ctx.strokeStyle='rgba(255,255,255,0.08)';ctx.stroke();
+  // Eichstrich
+  const hx=half(EICH);
+  ctx.beginPath();ctx.moveTo(hx-0.11,EICH);ctx.lineTo(hx-0.01,EICH);ctx.lineWidth=2*lw;ctx.strokeStyle='rgba(255,255,255,0.75)';ctx.stroke();
+  ctx.save();ctx.translate(hx-0.11,EICH+0.012);ctx.scale(1,-1);ctx.fillStyle='rgba(255,255,255,0.8)';
+  ctx.font=`600 ${0.042}px Outfit, system-ui, sans-serif`;ctx.textAlign='left';ctx.fillText('0,5 l',0,0);ctx.restore();
+  ctx.restore();
+
+  // spill stream
+  ctx.lineCap='round';
+  for(const p of parts){
+    ctx.strokeStyle=p.foam?'rgba(255,246,228,0.85)':'rgba(238,165,48,0.9)';
+    ctx.lineWidth=(p.foam?0.02:0.016);
+    ctx.beginPath();ctx.moveTo(p.px,p.py);ctx.lineTo(p.x,p.y+0.0001);ctx.stroke();
+  }
+}
+function poly(P){ctx.beginPath();ctx.moveTo(P[0][0],P[0][1]);for(let i=1;i<P.length;i++)ctx.lineTo(P[i][0],P[i][1]);ctx.closePath();}
+function outerPath(){
+  ctx.beginPath();
+  for(let i=0;i<=N;i++){const t=i/N;const x=half(t)+0.018,y=i===0?-0.07:t;i===0?ctx.moveTo(half(0)+0.02,-0.07):ctx.lineTo(x,y);}
+  ctx.lineTo(half(1),1);ctx.lineTo(-half(1),1);
+  for(let i=N;i>=1;i--){const t=i/N;ctx.lineTo(-half(t)-0.018,t);}
+  ctx.lineTo(-half(0)-0.02,-0.07);ctx.closePath();
+}
+
+requestAnimationFrame(step);
+})();
+</script>
+</body></html>
